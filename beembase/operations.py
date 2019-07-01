@@ -31,6 +31,7 @@ from .objects import (
     Beneficiaries,
     Beneficiary,
     CommentOptionExtensions,
+    SocialActionVariant,
 )
 
 default_prefix = "STM"
