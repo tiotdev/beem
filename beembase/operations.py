@@ -957,7 +957,7 @@ class Social_action(GrapheneObject):
 
             # handle action
             action = kwargs.get('action')
-            if action is None:
+            if action == None:
                 action_obj = kwargs.get('social_action_comment_create')
                 action_id = 0
                 if action_obj and type(action_obj) == dict:
