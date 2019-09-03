@@ -31,7 +31,7 @@ from .exceptions import (
 from .wallet import Wallet
 from .steemconnect import SteemConnect
 from .transactionbuilder import TransactionBuilder
-from .utils import formatTime, resolve_authorperm, derive_permlink, remove_from_dict, addTzInfo, formatToTimeStamp
+from .utils import formatTime, resolve_authorperm, derive_permlink, sanitize_permlink, remove_from_dict, addTzInfo, formatToTimeStamp
 from beem.constants import STEEM_VOTE_REGENERATION_SECONDS, STEEM_100_PERCENT, STEEM_1_PERCENT, STEEM_RC_REGEN_TIME
 
 log = logging.getLogger(__name__)
@@ -271,10 +271,9 @@ class Steem(object):
         self.data["dynamic_global_properties"] = self.get_dynamic_global_properties(False)
         try:
             self.data['feed_history'] = self.get_feed_history(False)
-            self.data['get_feed_history'] = self.get_feed_history(False)
         except:
             self.data['feed_history'] = None
-            self.data['get_feed_history'] = None
+        self.data['get_feed_history'] = self.data['feed_history']
         try:
             self.data['hardfork_properties'] = self.get_hardfork_properties(False)
         except:
@@ -305,15 +304,18 @@ class Steem(object):
         if self.rpc is None:
             return None
         self.rpc.set_next_node_on_empty_reply(True)
-        if self.rpc.get_use_appbase():
-            return self.rpc.get_reserve_ratio(api="witness")
-        else:
-            props = self.get_dynamic_global_properties()
-            # conf = self.get_config()
+
+        props = self.get_dynamic_global_properties()
+        # conf = self.get_config()
+        try:
             reserve_ratio = {'id': 0, 'average_block_size': props['average_block_size'],
                              'current_reserve_ratio': props['current_reserve_ratio'],
                              'max_virtual_bandwidth': props['max_virtual_bandwidth']}
-            return reserve_ratio
+        except:
+            reserve_ratio = {'id': 0, 'average_block_size': None,
+                             'current_reserve_ratio': None,
+                             'max_virtual_bandwidth': None}            
+        return reserve_ratio
 
     def get_feed_history(self, use_stored_data=True):
         """ Returns the feed_history
@@ -1550,6 +1552,33 @@ class Steem(object):
             })
         return self.finalizeOp(op, account, "active", **kwargs)
 
+    def update_proposal_votes(self, proposal_ids, approve, account=None, **kwargs):
+        """ Update proposal votes
+
+            :param list proposal_ids: list of proposal ids
+            :param bool approve: True/False
+            :param str account: (optional) witness account name
+
+
+        """
+        if not account and config["default_account"]:
+            account = config["default_account"]
+        if not account:
+            raise ValueError("You need to provide an account")
+
+        account = Account(account, steem_instance=self)
+        if not isinstance(proposal_ids, list):
+            proposal_ids = [proposal_ids]
+
+        op = operations.Update_proposal_votes(
+            **{
+                "voter": account["name"],
+                "proposal_ids": proposal_ids,
+                "approve": approve,
+                "prefix": self.prefix,
+            })
+        return self.finalizeOp(op, account, "active", **kwargs)
+
     def _test_weights_treshold(self, authority):
         """ This method raises an error if the threshold of an authority cannot
             be reached by the weights.
@@ -1775,7 +1804,7 @@ class Steem(object):
             if not permlink:
                 permlink = derive_permlink(title, parent_permlink)
         elif category:
-            parent_permlink = derive_permlink(category)
+            parent_permlink = sanitize_permlink(category)
             parent_author = ""
             if not permlink:
                 permlink = derive_permlink(title)
@@ -1816,6 +1845,42 @@ class Steem(object):
             ops.append(vote_op)
 
         return self.finalizeOp(ops, account, "posting", **kwargs)
+
+    def vote(self, weight, identifier, account=None, **kwargs):
+        """ Vote for a post
+
+            :param float weight: Voting weight. Range: -100.0 - +100.0.
+            :param str identifier: Identifier for the post to vote. Takes the
+                form ``@author/permlink``.
+            :param str account: (optional) Account to use for voting. If
+                ``account`` is not defined, the ``default_account`` will be used
+                or a ValueError will be raised
+
+        """
+        if not account:
+            if "default_account" in self.config:
+                account = self.config["default_account"]
+        if not account:
+            raise ValueError("You need to provide an account")
+        account = Account(account, steem_instance=self)
+
+        [post_author, post_permlink] = resolve_authorperm(identifier)
+
+        vote_weight = int(float(weight) * STEEM_1_PERCENT)
+        if vote_weight > STEEM_100_PERCENT:
+            vote_weight = STEEM_100_PERCENT
+        if vote_weight < -STEEM_100_PERCENT:
+            vote_weight = -STEEM_100_PERCENT
+
+        op = operations.Vote(
+            **{
+                "voter": account["name"],
+                "author": post_author,
+                "permlink": post_permlink,
+                "weight": vote_weight
+            })
+
+        return self.finalizeOp(op, account, "posting", **kwargs)
 
     def comment_options(self, options, identifier, beneficiaries=[],
                         account=None, **kwargs):

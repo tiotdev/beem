@@ -17,7 +17,7 @@ from time import sleep
 import logging
 from datetime import datetime, timedelta
 from .utils import formatTimeString, addTzInfo
-from .block import Block
+from .block import Block, BlockHeader
 from beemapi.node import Nodes
 from beemapi.steemnoderpc import SteemNodeRPC
 from .exceptions import BatchedCallsNotSupported, BlockDoesNotExistsException, BlockWaitTimeExceeded, OfflineHasNoRPCException
@@ -310,12 +310,22 @@ class Blockchain(object):
 
             .. note:: The block number returned depends on the ``mode`` used
                       when instantiating from this class.
+
+            .. code-block:: python
+        
+                >>> from beem.blockchain import Blockchain
+                >>> from datetime import datetime
+                >>> blockchain = Blockchain()
+                >>> block_num = blockchain.get_estimated_block_num(datetime(2019, 6, 18, 5 ,8, 27))
+                >>> block_num == 33898184
+                True
+
         """
         last_block = self.get_current_block()
         date = addTzInfo(date)
         if estimateForwards:
             block_offset = 10
-            first_block = Block(block_offset, steem_instance=self.steem)
+            first_block = BlockHeader(block_offset, steem_instance=self.steem)
             time_diff = date - first_block.time()
             block_number = math.floor(time_diff.total_seconds() / self.block_interval + block_offset)
         else:
@@ -328,9 +338,17 @@ class Blockchain(object):
             if block_number > last_block.identifier:
                 block_number = last_block.identifier
             block_time_diff = timedelta(seconds=10)
+            
+            last_block_time_diff_seconds = 10
+            second_last_block_time_diff_seconds = 10
+            
             while block_time_diff.total_seconds() > self.block_interval or block_time_diff.total_seconds() < -self.block_interval:
-                block = Block(block_number, steem_instance=self.steem)
+                block = BlockHeader(block_number, steem_instance=self.steem)
+                second_last_block_time_diff_seconds = last_block_time_diff_seconds
+                last_block_time_diff_seconds = block_time_diff.total_seconds()
                 block_time_diff = date - block.time()
+                if second_last_block_time_diff_seconds == block_time_diff.total_seconds() and second_last_block_time_diff_seconds < 10:
+                    return int(block_number)
                 delta = block_time_diff.total_seconds() // self.block_interval
                 if delta == 0 and block_time_diff.total_seconds() < 0:
                     delta = -1
@@ -906,7 +924,7 @@ class Blockchain(object):
             return None
         self.steem.rpc.set_next_node_on_empty_reply(False)
         if self.steem.rpc.get_use_appbase():
-            account = self.steem.rpc.list_accounts({'start': name, 'limit': limit}, api="database")
+            account = self.steem.rpc.list_accounts({'start': name, 'limit': limit, 'order': 'by_name'}, api="database")
             if bool(account):
                 return account["accounts"]
         else:

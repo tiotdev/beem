@@ -19,7 +19,7 @@ from .blockchainobject import BlockchainObject
 from .exceptions import ContentDoesNotExistsException, VotingInvalidOnArchivedPost
 from beembase import operations
 from beemgraphenebase.py23 import py23_bytes, bytes_types, integer_types, string_types, text_type
-from beem.constants import STEEM_REVERSE_AUCTION_WINDOW_SECONDS_HF6, STEEM_REVERSE_AUCTION_WINDOW_SECONDS_HF20, STEEM_100_PERCENT, STEEM_1_PERCENT
+from beem.constants import STEEM_REVERSE_AUCTION_WINDOW_SECONDS_HF6, STEEM_REVERSE_AUCTION_WINDOW_SECONDS_HF20, STEEM_100_PERCENT, STEEM_1_PERCENT, STEEM_REVERSE_AUCTION_WINDOW_SECONDS_HF21
 log = logging.getLogger(__name__)
 
 
@@ -28,6 +28,7 @@ class Comment(BlockchainObject):
 
         :param str authorperm: identifier to post/comment in the form of
             ``@author/permlink``
+        :param boolean use_tags_api: when set to False, list_comments from the database_api is used
         :param Steem steem_instance: :class:`beem.steem.Steem` instance to use when accessing a RPC
 
 
@@ -36,7 +37,7 @@ class Comment(BlockchainObject):
         >>> from beem.comment import Comment
         >>> from beem.account import Account
         >>> from beem import Steem
-        >>> stm = Steem("https://steemd.minnowsupportproject.org")
+        >>> stm = Steem()
         >>> acc = Account("gtg", steem_instance=stm)
         >>> authorperm = acc.get_blog(limit=1)[0]["authorperm"]
         >>> c = Comment(authorperm)
@@ -49,12 +50,14 @@ class Comment(BlockchainObject):
     def __init__(
         self,
         authorperm,
+        use_tags_api=True,
         full=True,
         lazy=False,
         steem_instance=None
     ):
         self.full = full
         self.lazy = lazy
+        self.use_tags_api = use_tags_api
         self.steem = steem_instance or shared_steem_instance()
         if isinstance(authorperm, string_types) and authorperm != "":
             [author, permlink] = resolve_authorperm(authorperm)
@@ -145,7 +148,17 @@ class Comment(BlockchainObject):
         [author, permlink] = resolve_authorperm(self.identifier)
         self.steem.rpc.set_next_node_on_empty_reply(True)
         if self.steem.rpc.get_use_appbase():
-            content = self.steem.rpc.get_discussion({'author': author, 'permlink': permlink}, api="tags")
+            try:
+                if self.use_tags_api:
+                    content = self.steem.rpc.get_discussion({'author': author, 'permlink': permlink}, api="tags")
+                else:
+                    content =self.steem.rpc.list_comments({"start": [author, permlink], "limit": 1, "order": "by_permlink"}, api="database")
+                if content is not None and "comments" in content:
+                    content =content["comments"]
+                if isinstance(content, list) and len(content) >0:
+                    content =content[0]
+            except:
+                content = self.steem.rpc.get_content(author, permlink)
         else:
             content = self.steem.rpc.get_content(author, permlink)
         if not content or not content['author'] or not content['permlink']:
@@ -307,7 +320,9 @@ class Comment(BlockchainObject):
             which will compentsate the curation penalty, if voting earlier than 15 minutes
         """
         self.refresh()
-        if self.steem.hardfork >= 20:
+        if self.steem.hardfork >= 21:
+            reverse_auction_window_seconds = STEEM_REVERSE_AUCTION_WINDOW_SECONDS_HF21
+        elif self.steem.hardfork >= 20:
             reverse_auction_window_seconds = STEEM_REVERSE_AUCTION_WINDOW_SECONDS_HF20
         else:
             reverse_auction_window_seconds = STEEM_REVERSE_AUCTION_WINDOW_SECONDS_HF6
@@ -348,7 +363,9 @@ class Comment(BlockchainObject):
             elapsed_seconds = (vote_time - self["created"]).total_seconds()
         else:
             raise ValueError("vote_time must be a string or a datetime")
-        if self.steem.hardfork >= 20:
+        if self.steem.hardfork >= 21:
+            reward = (elapsed_seconds / STEEM_REVERSE_AUCTION_WINDOW_SECONDS_HF21)
+        elif self.steem.hardfork >= 20:
             reward = (elapsed_seconds / STEEM_REVERSE_AUCTION_WINDOW_SECONDS_HF20)
         else:
             reward = (elapsed_seconds / STEEM_REVERSE_AUCTION_WINDOW_SECONDS_HF6)
@@ -370,9 +387,15 @@ class Comment(BlockchainObject):
             voter = Account(self["author"], steem_instance=self.steem)
         else:
             voter = Account(voter, steem_instance=self.steem)
-        for vote in self["active_votes"]:
-            if voter["name"] == vote["voter"]:
-                specific_vote = vote
+        if "active_votes" in self:
+            for vote in self["active_votes"]:
+                if voter["name"] == vote["voter"]:
+                    specific_vote = vote
+        else:
+            active_votes = self.get_votes()
+            for vote in active_votes:
+                if voter["name"] == vote["voter"]:
+                    specific_vote = vote 
         if specific_vote is not None and (raw_data or not self.is_pending()):
             return specific_vote
         elif specific_vote is not None:
@@ -490,13 +513,25 @@ class Comment(BlockchainObject):
         if median_hist is not None:
             median_price = Price(median_hist, steem_instance=self.steem)
         pending_rewards = False
-        total_vote_weight = self["total_vote_weight"]
+        if "active_votes" in self:
+            active_votes_list = self["active_votes"]
+        else:
+            active_votes_list = self.get_votes()
+        if "total_vote_weight" in self:
+            total_vote_weight = self["total_vote_weight"]
+        else:
+            total_vote_weight = 0
+            for vote in active_votes_list:
+                total_vote_weight += vote["weight"]
+            
         if not self["allow_curation_rewards"] or not self.is_pending():
             max_rewards = Amount(0, self.steem.steem_symbol, steem_instance=self.steem)
             unclaimed_rewards = max_rewards.copy()
         else:
-            if pending_payout_value is None:
+            if pending_payout_value is None and "pending_payout_value" in self:
                 pending_payout_value = Amount(self["pending_payout_value"], steem_instance=self.steem)
+            elif pending_payout_value is None:
+                pending_payout_value = 0
             elif isinstance(pending_payout_value, (float, integer_types)):
                 pending_payout_value = Amount(pending_payout_value, self.steem.sbd_symbol, steem_instance=self.steem)
             elif isinstance(pending_payout_value, str):
@@ -509,7 +544,8 @@ class Comment(BlockchainObject):
             pending_rewards = True
 
         active_votes = {}
-        for vote in self["active_votes"]:
+
+        for vote in active_votes_list:
             if total_vote_weight > 0:
                 claim = max_rewards * int(vote["weight"]) / total_vote_weight
             else:
@@ -552,7 +588,9 @@ class Comment(BlockchainObject):
             return None
         self.steem.rpc.set_next_node_on_empty_reply(False)
         if self.steem.rpc.get_use_appbase():
-            content_replies = self.steem.rpc.get_content_replies({'author': post_author, 'permlink': post_permlink}, api="tags")['discussions']
+            content_replies = self.steem.rpc.get_content_replies({'author': post_author, 'permlink': post_permlink}, api="tags")
+            if 'discussions' in content_replies:
+                content_replies = content_replies['discussions']
         else:
             content_replies = self.steem.rpc.get_content_replies(post_author, post_permlink, api="tags")
         if raw_data:
@@ -583,7 +621,7 @@ class Comment(BlockchainObject):
 
     def get_votes(self, raw_data=False):
         """Returns all votes as ActiveVotes object"""
-        if raw_data:
+        if raw_data and "active_votes" in self:
             return self["active_votes"]
         from .vote import ActiveVotes
         return ActiveVotes(self, lazy=False, steem_instance=self.steem)
@@ -596,13 +634,15 @@ class Comment(BlockchainObject):
             :param str voter: (optional) Voting account
 
         """
+        if weight < 0:
+            raise ValueError("Weight must be >= 0.")
         last_payout = self.get('last_payout', None)
         if last_payout is not None:
             if formatToTimeStamp(last_payout) > 0:
                 raise VotingInvalidOnArchivedPost
         return self.vote(weight, account=voter)
 
-    def downvote(self, weight=-100, voter=None):
+    def downvote(self, weight=100, voter=None):
         """ Downvote the post
 
             :param float weight: (optional) Weight for posting (-100.0 -
@@ -610,11 +650,13 @@ class Comment(BlockchainObject):
             :param str voter: (optional) Voting account
 
         """
+        if weight < 0:
+            raise ValueError("Weight must be >= 0.")        
         last_payout = self.get('last_payout', None)
         if last_payout is not None:
             if formatToTimeStamp(last_payout) > 0:
                 raise VotingInvalidOnArchivedPost
-        return self.vote(weight, account=voter)
+        return self.vote(-weight, account=voter)
 
     def vote(self, weight, account=None, identifier=None, **kwargs):
         """ Vote for a post
@@ -627,33 +669,10 @@ class Comment(BlockchainObject):
                 form ``@author/permlink``.
 
         """
-        if not account:
-            if "default_account" in self.steem.config:
-                account = self.steem.config["default_account"]
-        if not account:
-            raise ValueError("You need to provide an account")
-        account = Account(account, steem_instance=self.steem)
         if not identifier:
-            post_author = self["author"]
-            post_permlink = self["permlink"]
-        else:
-            [post_author, post_permlink] = resolve_authorperm(identifier)
+            identifier = construct_authorperm(self["author"], self["permlink"])
 
-        vote_weight = int(float(weight) * STEEM_1_PERCENT)
-        if vote_weight > STEEM_100_PERCENT:
-            vote_weight = STEEM_100_PERCENT
-        if vote_weight < -STEEM_100_PERCENT:
-            vote_weight = -STEEM_100_PERCENT
-
-        op = operations.Vote(
-            **{
-                "voter": account["name"],
-                "author": post_author,
-                "permlink": post_permlink,
-                "weight": vote_weight
-            })
-
-        return self.steem.finalizeOp(op, account, "posting", **kwargs)
+        return self.steem.vote(weight, identifier, account=account)
 
     def edit(self, body, meta=None, replace=False):
         """ Edit an existing post

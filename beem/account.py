@@ -48,7 +48,7 @@ class Account(BlockchainObject):
 
             >>> from beem.account import Account
             >>> from beem import Steem
-            >>> stm = Steem("https://steemd.minnowsupportproject.org")
+            >>> stm = Steem()
             >>> account = Account("gtg", steem_instance=stm)
             >>> print(account)
             <Account gtg>
@@ -99,7 +99,7 @@ class Account(BlockchainObject):
             return
         self.steem.rpc.set_next_node_on_empty_reply(self.steem.rpc.get_use_appbase())
         if self.steem.rpc.get_use_appbase():
-                account = self.steem.rpc.find_accounts({'accounts': [self.identifier]}, api="database")
+            account = self.steem.rpc.find_accounts({'accounts': [self.identifier]}, api="database")
         else:
             if self.full:
                 account = self.steem.rpc.get_accounts(
@@ -311,7 +311,7 @@ class Account(BlockchainObject):
             self.refresh()
             self.steem.refresh_data(True)
         bandwidth = self.get_bandwidth()
-        if bandwidth["allocated"] > 0:
+        if bandwidth is not None and bandwidth["allocated"] is not None and bandwidth["allocated"] > 0:
             remaining = 100 - bandwidth["used"] / bandwidth["allocated"] * 100
             used_kb = bandwidth["used"] / 1024
             allocated_mb = bandwidth["allocated"] / 1024 / 1024
@@ -329,12 +329,13 @@ class Account(BlockchainObject):
             t.align = "l"
             t.add_row(["Name (rep)", self.name + " (%.2f)" % (self.rep)])
             t.add_row(["Voting Power", "%.2f %%, " % (self.get_voting_power())])
+            t.add_row(["Downvoting Power", "%.2f %%, " % (self.get_downvoting_power())])
             t.add_row(["Vote Value", "%.2f $" % (self.get_voting_value_SBD())])
             t.add_row(["Last vote", "%s ago" % last_vote_time_str])
             t.add_row(["Full in ", "%s" % (self.get_recharge_time_str())])
             t.add_row(["Steem Power", "%.2f %s" % (self.get_steem_power(), self.steem.steem_symbol)])
             t.add_row(["Balance", "%s, %s" % (str(self.balances["available"][0]), str(self.balances["available"][1]))])
-            if False and bandwidth["allocated"] > 0:
+            if False and bandwidth is not None and bandwidth["allocated"] is not None and bandwidth["allocated"] > 0:
                 t.add_row(["Remaining Bandwidth", "%.2f %%" % (remaining)])
                 t.add_row(["used/allocated Bandwidth", "(%.0f kb of %.0f mb)" % (used_kb, allocated_mb)])
             if rc_mana is not None:
@@ -360,8 +361,10 @@ class Account(BlockchainObject):
             ret = self.name + " (%.2f) \n" % (self.rep)
             ret += "--- Voting Power ---\n"
             ret += "%.2f %%, " % (self.get_voting_power())
-            ret += " VP = %.2f $\n" % (self.get_voting_value_SBD())
+            ret += " %.2f $\n" % (self.get_voting_value_SBD())
             ret += "full in %s \n" % (self.get_recharge_time_str())
+            ret += "--- Downvoting Power ---\n"
+            ret += "%.2f %% \n" % (self.get_downvoting_power())
             ret += "--- Balance ---\n"
             ret += "%.2f SP, " % (self.get_steem_power())
             ret += "%s, %s\n" % (str(self.balances["available"][0]), str(self.balances["available"][1]))
@@ -391,9 +394,12 @@ class Account(BlockchainObject):
             return None
         self.steem.rpc.set_next_node_on_empty_reply(False)
         if self.steem.rpc.get_use_appbase():
-            rep = self.steem.rpc.get_account_reputations({'account_lower_bound': self["name"], 'limit': 1}, api="follow")['reputations']
-            if len(rep) > 0:
-                rep = int(rep[0]['reputation'])
+            try:
+                rep = self.steem.rpc.get_account_reputations({'account_lower_bound': self["name"], 'limit': 1}, api="follow")['reputations']
+                if len(rep) > 0:
+                    rep = int(rep[0]['reputation'])
+            except:
+                rep = int(self['reputation'])
         else:
             rep = int(self['reputation'])
         return reputation_to_score(rep)
@@ -408,6 +414,30 @@ class Account(BlockchainObject):
             max_mana = int(self.steem.sp_to_vests(required_fee_steem))
         last_mana = int(self["voting_manabar"]["current_mana"])
         last_update_time = self["voting_manabar"]["last_update_time"]
+        last_update = datetime.utcfromtimestamp(last_update_time)
+        diff_in_seconds = (addTzInfo(datetime.utcnow()) - addTzInfo(last_update)).total_seconds()
+        current_mana = int(last_mana + diff_in_seconds * max_mana / STEEM_VOTING_MANA_REGENERATION_SECONDS)
+        if current_mana > max_mana:
+            current_mana = max_mana
+        if max_mana > 0:
+            current_mana_pct = current_mana / max_mana * 100
+        else:
+            current_mana_pct = 0
+        return {"last_mana": last_mana, "last_update_time": last_update_time,
+                "current_mana": current_mana, "max_mana": max_mana, "current_mana_pct": current_mana_pct}
+
+    def get_downvote_manabar(self):
+        """ Return downvote manabar
+        """
+        if "downvote_manabar" not in self:
+            return None
+        max_mana = self.get_effective_vesting_shares() / 4
+        if max_mana == 0:
+            props = self.steem.get_chain_properties()
+            required_fee_steem = Amount(props["account_creation_fee"], steem_instance=self.steem)
+            max_mana = int(self.steem.sp_to_vests(required_fee_steem) / 4)
+        last_mana = int(self["downvote_manabar"]["current_mana"])
+        last_update_time = self["downvote_manabar"]["last_update_time"]
         last_update = datetime.utcfromtimestamp(last_update_time)
         diff_in_seconds = (addTzInfo(datetime.utcnow()) - addTzInfo(last_update)).total_seconds()
         current_mana = int(last_mana + diff_in_seconds * max_mana / STEEM_VOTING_MANA_REGENERATION_SECONDS)
@@ -445,6 +475,26 @@ class Account(BlockchainObject):
         if total_vp < 0:
             return 0
         return total_vp
+
+    def get_downvoting_power(self, with_regeneration=True):
+        """ Returns the account downvoting power in the range of 0-100%
+        """
+        if "downvote_manabar" not in self:
+            return 0
+
+        manabar = self.get_downvote_manabar()
+        if with_regeneration:
+            total_down_vp = manabar["current_mana_pct"]
+        else:
+            if manabar["max_mana"] > 0:
+                total_down_vp = manabar["last_mana"] / manabar["max_mana"] * 100
+            else:
+                total_down_vp = 0
+        if total_down_vp > 100:
+            return 100
+        if total_down_vp < 0:
+            return 0
+        return total_down_vp
 
     def get_vests(self, only_own_vests=False):
         """ Returns the account vests
@@ -610,7 +660,7 @@ class Account(BlockchainObject):
 
                 >>> from beem.account import Account
                 >>> from beem import Steem
-                >>> stm = Steem("https://steemd.minnowsupportproject.org")
+                >>> stm = Steem()
                 >>> account = Account("steemit", steem_instance=stm)
                 >>> account.get_feed(0, 1, raw_data=True)
                 []
@@ -623,32 +673,38 @@ class Account(BlockchainObject):
         if not self.steem.is_connected():
             return None
         self.steem.rpc.set_next_node_on_empty_reply(False)
-        if raw_data and short_entries and self.steem.rpc.get_use_appbase():
-            return [
-                c for c in self.steem.rpc.get_feed_entries({'account': account, 'start_entry_id': start_entry_id, 'limit': limit}, api='follow')["feed"]
-            ]
-        elif raw_data and short_entries and not self.steem.rpc.get_use_appbase():
-            return [
-                c for c in self.steem.rpc.get_feed_entries(account, start_entry_id, limit, api='follow')
-            ]
-        elif raw_data and self.steem.rpc.get_use_appbase():
-            return [
-                c for c in self.steem.rpc.get_feed({'account': account, 'start_entry_id': start_entry_id, 'limit': limit}, api='follow')["feed"]
-            ]
-        elif raw_data and not self.steem.rpc.get_use_appbase():
-            return [
-                c for c in self.steem.rpc.get_feed(account, start_entry_id, limit, api='follow')
-            ]
-        elif not raw_data and self.steem.rpc.get_use_appbase():
-            from .comment import Comment
-            return [
-                Comment(c['comment'], steem_instance=self.steem) for c in self.steem.rpc.get_feed({'account': account, 'start_entry_id': start_entry_id, 'limit': limit}, api='follow')["feed"]
-            ]
-        else:
-            from .comment import Comment
-            return [
-                Comment(c['comment'], steem_instance=self.steem) for c in self.steem.rpc.get_feed(account, start_entry_id, limit, api='follow')
-            ]
+        success = True
+        if self.steem.rpc.get_use_appbase():
+            try:
+                if raw_data and short_entries:
+                    return [
+                        c for c in self.steem.rpc.get_feed_entries({'account': account, 'start_entry_id': start_entry_id, 'limit': limit}, api='follow')["feed"]
+                    ]
+                elif raw_data:
+                    return [
+                        c for c in self.steem.rpc.get_feed({'account': account, 'start_entry_id': start_entry_id, 'limit': limit}, api='follow')["feed"]
+                    ]
+                elif not raw_data:
+                    from .comment import Comment
+                    return [
+                        Comment(c['comment'], steem_instance=self.steem) for c in self.steem.rpc.get_feed({'account': account, 'start_entry_id': start_entry_id, 'limit': limit}, api='follow')["feed"]
+                    ]
+            except:
+                success = False
+        if not self.steem.rpc.get_use_appbase() or not success:
+            if raw_data and short_entries:
+                return [
+                    c for c in self.steem.rpc.get_feed_entries(account, start_entry_id, limit, api='follow')
+                ]
+            elif raw_data:
+                return [
+                    c for c in self.steem.rpc.get_feed(account, start_entry_id, limit, api='follow')
+                ]
+            else:
+                from .comment import Comment
+                return [
+                    Comment(c['comment'], steem_instance=self.steem) for c in self.steem.rpc.get_feed(account, start_entry_id, limit, api='follow')
+                ]
 
     def get_feed_entries(self, start_entry_id=0, limit=100, raw_data=True,
                          account=None):
@@ -666,7 +722,7 @@ class Account(BlockchainObject):
 
                 >>> from beem.account import Account
                 >>> from beem import Steem
-                >>> stm = Steem("https://steemd.minnowsupportproject.org")
+                >>> stm = Steem()
                 >>> account = Account("steemit", steem_instance=stm)
                 >>> account.get_feed_entries(0, 1)
                 []
@@ -689,7 +745,7 @@ class Account(BlockchainObject):
 
                 >>> from beem.account import Account
                 >>> from beem import Steem
-                >>> stm = Steem("https://steemd.minnowsupportproject.org")
+                >>> stm = Steem()
                 >>> account = Account("steemit", steem_instance=stm)
                 >>> entry = account.get_blog_entries(0, 1, raw_data=True)[0]
                 >>> print("%s - %s - %s - %s" % (entry["author"], entry["permlink"], entry["blog"], entry["reblog_on"]))
@@ -713,7 +769,7 @@ class Account(BlockchainObject):
 
                 >>> from beem.account import Account
                 >>> from beem import Steem
-                >>> stm = Steem("https://steemd.minnowsupportproject.org")
+                >>> stm = Steem()
                 >>> account = Account("steemit", steem_instance=stm)
                 >>> account.get_blog(0, 1)
                 [<Comment @steemit/firstpost>]
@@ -726,41 +782,50 @@ class Account(BlockchainObject):
         if not self.steem.is_connected():
             raise OfflineHasNoRPCException("No RPC available in offline mode!")
         self.steem.rpc.set_next_node_on_empty_reply(False)
-        if raw_data and short_entries and self.steem.rpc.get_use_appbase():
-            ret = self.steem.rpc.get_blog_entries({'account': account, 'start_entry_id': start_entry_id, 'limit': limit}, api='follow')
-            if isinstance(ret, dict) and "blog" in ret:
-                ret = ret["blog"]
-            return [
-                c for c in ret
-            ]
-        elif raw_data and short_entries and not self.steem.rpc.get_use_appbase():
-            return [
-                c for c in self.steem.rpc.get_blog_entries(account, start_entry_id, limit, api='follow')
-            ]
-        elif raw_data and self.steem.rpc.get_use_appbase():
-            ret = self.steem.rpc.get_blog({'account': account, 'start_entry_id': start_entry_id, 'limit': limit}, api='follow')
-            if isinstance(ret, dict) and "blog" in ret:
-                ret = ret["blog"]            
-            return [
-                c for c in ret
-            ]
-        elif raw_data and not self.steem.rpc.get_use_appbase():
-            return [
-                c for c in self.steem.rpc.get_blog(account, start_entry_id, limit, api='follow')
-            ]
-        elif not raw_data and self.steem.rpc.get_use_appbase():
-            from .comment import Comment
-            ret = self.steem.rpc.get_blog({'account': account, 'start_entry_id': start_entry_id, 'limit': limit}, api='follow')
-            if isinstance(ret, dict) and "blog" in ret:
-                ret = ret["blog"]
-            return [
-                Comment(c["comment"], steem_instance=self.steem) for c in ret
-            ]                
-        else:
-            from .comment import Comment
-            return [
-                Comment(c["comment"], steem_instance=self.steem) for c in self.steem.rpc.get_blog(account, start_entry_id, limit, api='follow')
-            ]
+        success = True
+        if self.steem.rpc.get_use_appbase():
+            try:
+                if raw_data and short_entries:
+                    ret = self.steem.rpc.get_blog_entries({'account': account, 'start_entry_id': start_entry_id, 'limit': limit}, api='follow')
+                    if isinstance(ret, dict) and "blog" in ret:
+                        ret = ret["blog"]
+                    return [
+                        c for c in ret
+                    ]
+                elif raw_data:
+                    ret = self.steem.rpc.get_blog({'account': account, 'start_entry_id': start_entry_id, 'limit': limit}, api='follow')
+                    if isinstance(ret, dict) and "blog" in ret:
+                        ret = ret["blog"]
+                    return [
+                        c for c in ret
+                    ]
+                elif not raw_data:
+                    from .comment import Comment
+                    ret = self.steem.rpc.get_blog({'account': account, 'start_entry_id': start_entry_id, 'limit': limit}, api='follow')
+                    if isinstance(ret, dict) and "blog" in ret:
+                        ret = ret["blog"]
+                    return [
+                        Comment(c["comment"], steem_instance=self.steem) for c in ret
+                    ]
+            except:
+                success = False
+
+        if not self.steem.rpc.get_use_appbase() or not success:
+            if raw_data and short_entries:
+                return [
+                    c for c in self.steem.rpc.get_blog_entries(account, start_entry_id, limit, api='follow')
+                ]
+
+            elif raw_data:
+                return [
+                    c for c in self.steem.rpc.get_blog(account, start_entry_id, limit, api='follow')
+                ]
+
+            else:
+                from .comment import Comment
+                return [
+                    Comment(c["comment"], steem_instance=self.steem) for c in self.steem.rpc.get_blog(account, start_entry_id, limit, api='follow')
+                ]
 
     def get_blog_authors(self, account=None):
         """ Returns a list of authors that have had their content reblogged on a given blog account
@@ -773,7 +838,7 @@ class Account(BlockchainObject):
 
                 >>> from beem.account import Account
                 >>> from beem import Steem
-                >>> stm = Steem("https://steemd.minnowsupportproject.org")
+                >>> stm = Steem()
                 >>> account = Account("steemit", steem_instance=stm)
                 >>> account.get_blog_authors()
                 []
@@ -787,7 +852,10 @@ class Account(BlockchainObject):
             raise OfflineHasNoRPCException("No RPC available in offline mode!")
         self.steem.rpc.set_next_node_on_empty_reply(False)
         if self.steem.rpc.get_use_appbase():
-            return self.steem.rpc.get_blog_authors({'blog_account': account}, api='follow')['blog_authors']
+            try:
+                return self.steem.rpc.get_blog_authors({'blog_account': account}, api='follow')['blog_authors']
+            except:
+                return self.steem.rpc.get_blog_authors(account, api='follow')
         else:
             return self.steem.rpc.get_blog_authors(account, api='follow')
 
@@ -860,7 +928,7 @@ class Account(BlockchainObject):
                 elif direction == "following":
                     followers = self.steem.rpc.get_following(query, api='follow')
                     if isinstance(followers, dict) and 'following' in followers:
-                        followers = followers['following']         
+                        followers = followers['following']
             else:
                 if direction == "follower":
                     followers = self.steem.rpc.get_followers(self.name, last_user, what, limit, api='follow')
@@ -868,9 +936,9 @@ class Account(BlockchainObject):
                     followers = self.steem.rpc.get_following(self.name, last_user, what, limit, api='follow')
             if cnt == 0:
                 followers_list = followers
-            elif len(followers) > 1:
+            elif followers is not None and len(followers) > 1:
                 followers_list += followers[1:]
-            if len(followers) >= limit:
+            if followers is not None and len(followers) >= limit:
                 last_user = followers[-1][direction]
                 limit_reached = True
                 cnt += 1
@@ -985,7 +1053,7 @@ class Account(BlockchainObject):
                 balances = self.total_balances
             else:
                 return
-        
+
         if isinstance(symbol, dict) and "symbol" in symbol:
             symbol = symbol["symbol"]
 
@@ -1082,13 +1150,19 @@ class Account(BlockchainObject):
         else:
             received_vesting_shares = 0
         vesting_shares = self["vesting_shares"].amount
+        if reserve_ratio is None or reserve_ratio["max_virtual_bandwidth"] is None:
+            return {"used": None,
+                    "allocated": None}
         max_virtual_bandwidth = float(reserve_ratio["max_virtual_bandwidth"])
         total_vesting_shares = Amount(global_properties["total_vesting_shares"], steem_instance=self.steem).amount
         allocated_bandwidth = (max_virtual_bandwidth * (vesting_shares + received_vesting_shares) / total_vesting_shares)
         allocated_bandwidth = round(allocated_bandwidth / 1000000)
 
-        if not not self.steem.is_connected() and self.steem.rpc.get_use_appbase():
-            account_bandwidth = self.get_account_bandwidth(bandwidth_type=1, account=account)
+        if self.steem.is_connected() and self.steem.rpc.get_use_appbase():
+            try:
+                account_bandwidth = self.get_account_bandwidth(bandwidth_type=1, account=account)
+            except:
+                account_bandwidth = None
             if account_bandwidth is None:
                 return {"used": 0,
                         "allocated": allocated_bandwidth}
@@ -1352,7 +1426,7 @@ class Account(BlockchainObject):
 
                 >>> from beem.account import Account
                 >>> from beem import Steem
-                >>> stm = Steem("https://steemd.minnowsupportproject.org")
+                >>> stm = Steem()
                 >>> account = Account("beem.app", steem_instance=stm)
                 >>> account.get_tags_used_by_author()
                 []
@@ -1410,7 +1484,7 @@ class Account(BlockchainObject):
 
                 >>> from beem.account import Account
                 >>> from beem import Steem
-                >>> stm = Steem("https://steemd.minnowsupportproject.org")
+                >>> stm = Steem()
                 >>> account = Account("beem.app", steem_instance=stm)
                 >>> account.get_account_votes()
                 []
@@ -1436,7 +1510,7 @@ class Account(BlockchainObject):
                 ret = self.steem.rpc.list_votes({"start": [account, start_author, start_permlink], "limit": 1000, "order": "by_voter_comment"}, api="database")["votes"]
                 if start_author != "":
                     if len(ret) == 0:
-                        finished = True                     
+                        finished = True
                     ret = ret[1:]
                 for vote in ret:
                     if vote["voter"] != account:
@@ -2205,6 +2279,30 @@ class Account(BlockchainObject):
             })
         return self.steem.finalizeOp(op, account, "active", **kwargs)
 
+    def update_account_jsonmetadata(self, metadata, account=None, **kwargs):
+        """ Update an account's profile in json_metadata using the posting key
+
+            :param dict metadata: The new metadata to use
+            :param str account: (optional) the account to allow access
+                to (defaults to ``default_account``)
+
+        """
+        if account is None:
+            account = self
+        else:
+            account = Account(account, steem_instance=self.steem)
+        if isinstance(metadata, dict):
+            metadata = json.dumps(metadata)
+        elif not isinstance(metadata, str):
+            raise ValueError("Profile must be a dict or string!")
+        op = operations.Account_update(
+            **{
+                "account": account["name"],
+                "posting_json_metadata": metadata,
+                "prefix": self.steem.prefix,
+            })
+        return self.steem.finalizeOp(op, account, "posting", **kwargs)
+
     # -------------------------------------------------------------------------
     #  Approval and Disapproval of witnesses
     # -------------------------------------------------------------------------
@@ -2970,19 +3068,12 @@ class Account(BlockchainObject):
             query_limit = 100
             if limit is not None and reblogs:
                 query_limit = min(limit - post_count + 1, query_limit)
-            if not start_permlink:
-                # first iteration uses `get_blog`
-                results = self.get_blog(start_entry_id=start,
-                                        account=account,
-                                        limit=query_limit)
-            else:
-                # all following iterations use `get_discussions_by_blog`
-                from .discussions import Query, Discussions_by_blog
-                query = Query(start_author=start_author,
-                              start_permlink=start_permlink,
-                              limit=query_limit, tag=account['name'])
-                results = Discussions_by_blog(query,
-                                              steem_instance=self.steem)
+
+            from .discussions import Discussions_by_blog
+            query = {'start_author': start_author,
+                     'start_permlink':start_permlink,
+                     'limit': query_limit, 'tag': account['name']}
+            results = Discussions_by_blog(query, steem_instance=self.steem)
             if len(results) == 0 or (start_permlink and len(results) == 1):
                 return
             if start_permlink:
@@ -3039,10 +3130,10 @@ class Account(BlockchainObject):
             query_limit = 100
             if limit is not None:
                 query_limit = min(limit - comment_count + 1, query_limit)
-            from .discussions import Query, Discussions_by_comments
-            query = Query(start_author=account['name'],
-                          start_permlink=start_permlink,
-                          limit=query_limit, tag=account['name'])
+            from .discussions import Discussions_by_comments
+            query = {'start_author': account['name'],
+                     'start_permlink': start_permlink, 'limit':
+                     query_limit}
             results = Discussions_by_comments(query,
                                               steem_instance=self.steem)
             if len(results) == 0 or (start_permlink and len(results) == 1):
@@ -3112,10 +3203,11 @@ class Account(BlockchainObject):
             query_limit = 100
             if limit is not None:
                 query_limit = min(limit - reply_count + 1, query_limit)
-            from .discussions import Query, Replies_by_last_update
-            query = Query(start_parent_author=start_author,
-                          start_permlink=start_permlink,
-                          limit=query_limit)
+            from .discussions import Replies_by_last_update
+
+            query = {'start_author': start_author,
+                     'start_permlink': start_permlink, 'limit':
+                     query_limit}
             results = Replies_by_last_update(query,
                                              steem_instance=self.steem)
             if len(results) == 0 or (start_permlink and len(results) == 1):
